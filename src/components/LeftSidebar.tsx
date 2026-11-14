@@ -18,6 +18,7 @@ import { formatTemperature, formatVelocity, ms2ToG, type UnitSystem } from '../e
 import { useOnlineStatus } from '../hooks/usePWAInstall';
 import type { SafetyChatMessage } from '../hooks/useSafetyOfficerLLM';
 import { PWAInstallButton } from './PWAInstallButton';
+import { IgnimetheusFlameIcon } from './IgnimetheusFlameIcon';
 
 interface LeftSidebarProps {
   experiments: NasaPsiExperiment[];
@@ -164,18 +165,15 @@ export const LeftSidebar: React.FC<LeftSidebarProps> = ({
         {/* Top Brand Header */}
         <div className="flex h-11 items-center gap-2 border-b border-[#1F1F24] px-3 shrink-0">
           <div className="flex items-center gap-2 min-w-0">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden="true" className="shrink-0">
-              <path d="M3 6H21M3 18H21" stroke="#52525B" strokeWidth="1.5" strokeLinecap="square" />
-              <path d="M4 10H10M4 14H9" stroke="#A1A1AA" strokeWidth="1.5" strokeLinecap="round" />
-              <path
-                d="M14.5 8.5C17.2 8.5 19.2 10.1 20 12C19.2 13.9 17.2 15.5 14.5 15.5C12.7 15.5 11.4 13.9 11.4 12C11.4 10.1 12.7 8.5 14.5 8.5Z"
-                stroke="#F4F4F5"
-                strokeWidth="1.5"
-              />
-            </svg>
-            <span className="text-xs font-semibold tracking-tight text-[#F4F4F5] truncate">
-              Flame in Freefall
-            </span>
+            <IgnimetheusFlameIcon size={18} />
+            <div className="flex flex-col min-w-0 leading-tight">
+              <span className="text-xs font-semibold tracking-tight text-[#F4F4F5] truncate">
+                Ignimetheus
+              </span>
+              <span className="text-[10px] text-[#71717A] truncate">
+                Flame in Freefall
+              </span>
+            </div>
           </div>
 
           <button
