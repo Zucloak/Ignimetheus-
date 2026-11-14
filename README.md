@@ -1,5 +1,9 @@
 <p align="center">
-  <img src="public/assets/aistudio/ignimetheus_c6f750fa.svg" alt="Ignimetheus — Flame in Freefall" width="180" height="180" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="public/assets/aistudio/ignimetheus_dark.svg" />
+    <source media="(prefers-color-scheme: light)" srcset="public/assets/aistudio/ignimetheus_light.svg" />
+    <img src="public/assets/aistudio/ignimetheus_c6f750fa.svg" alt="Ignimetheus — Flame in Freefall" width="180" height="180" />
+  </picture>
 </p>
 
 # Ignimetheus
