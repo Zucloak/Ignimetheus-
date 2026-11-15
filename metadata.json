@@ -1,6 +1,6 @@
 {
-  "name": "Flame in Freefall — Microgravity Combustion & HVAC Digital Twin",
-  "description": "Precision aerospace thermo-fluids digital twin for spacecraft microgravity combustion, ventilation-driven flame spread, and NASA PSI experimental telemetry analysis.",
+  "name": "Ignimetheus",
+  "description": "Reduced-order SI thermo-fluids digital twin for spacecraft fire safety with offline WebGPU telemetry auditing",
   "requestFramePermissions": [],
   "majorCapabilities": []
 }
