@@ -9,8 +9,11 @@ import {
   buildTieredSystemPrompt,
   buildVerifiedSafetySnapshot,
   checkOutOfScopeQuery,
+  evaluateAuditedReasoningResponse,
+  extractThoughtAndAnswer,
   NUMERIC_GUARDRAIL_INSTRUCTION,
   quickRuleMatch,
+  REASONING_VALIDATION_FAILED_NOTE,
   tokenizeInlineMetricPills,
   trimToLastCompleteSentence,
 } from './safetyAdvisor';
@@ -245,5 +248,77 @@ test('trimToLastCompleteSentence trims truncated LLM output cleanly and buildTie
     const prompt = buildTieredSystemPrompt(params, telemetry, matched, 'nasa-psi', budget);
     assert.ok(prompt.includes(NUMERIC_GUARDRAIL_INSTRUCTION));
   }
+});
+
+test('extractThoughtAndAnswer isolates <think> blocks and excludes scratchpad numbers from numeric audit', () => {
+  const rawWithScratchpad = [
+    '<think>',
+    'Checking ratio 21.0 / 15.6 = 1.346 and hypothetical delta 999.9 mm/s.',
+    '</think>',
+    'HVAC: Isolate 120 mm duct flow from 15.0 cm/s to 0 cm/s at 21.0% O2 and 101.3 kPa (BASS-II-14).',
+  ].join('\n');
+
+  const extracted = extractThoughtAndAnswer(rawWithScratchpad);
+  assert.equal(
+    extracted.reasoningPath,
+    'Checking ratio 21.0 / 15.6 = 1.346 and hypothetical delta 999.9 mm/s.',
+  );
+  assert.ok(!extracted.answer.includes('<think>'));
+  assert.ok(!extracted.answer.includes('999.9'));
+  assert.equal(extracted.hasUnclosedThink, false);
+
+  const params = MISSION_PRESETS[0].params;
+  const telemetry = computeThermoTelemetry(params);
+  const matched = matchClosestExperiment(params, experiments);
+
+  const passedEval = evaluateAuditedReasoningResponse(
+    rawWithScratchpad,
+    'stop',
+    params,
+    telemetry,
+    matched,
+    'nasa-psi',
+  );
+  assert.ok(passedEval.auditedText);
+  assert.equal(passedEval.reasoningFailedValidation, false);
+  assert.equal(passedEval.reasoningPath, extracted.reasoningPath);
+
+  const emptyThink = extractThoughtAndAnswer('<think>\n\n</think>\n\nFinal grounded answer.');
+  assert.equal(emptyThink.reasoningPath, null);
+  assert.equal(emptyThink.answer, 'Final grounded answer.');
+
+  const unclosedThink = extractThoughtAndAnswer('<think>Partial reasoning 42.5');
+  assert.equal(unclosedThink.hasUnclosedThink, true);
+  assert.equal(unclosedThink.reasoningPath, 'Partial reasoning 42.5');
+  assert.equal(unclosedThink.answer, '');
+});
+
+test('evaluateAuditedReasoningResponse preserves rejected <think> path with fallback warning when audit fails', () => {
+  const params = MISSION_PRESETS[0].params;
+  const telemetry = computeThermoTelemetry(params);
+  const matched = matchClosestExperiment(params, experiments);
+
+  const hallucinatedWithThink = [
+    '<think>Evaluating boundary layer at 21.0% O2 and 15.0 cm/s.</think>',
+    'HVAC: At 19.7% O2 and 84.3 kPa, spread reaches 4.65 mm/s.',
+  ].join('\n');
+
+  const failedEval = evaluateAuditedReasoningResponse(
+    hallucinatedWithThink,
+    'stop',
+    params,
+    telemetry,
+    matched,
+    'nasa-psi',
+  );
+
+  assert.equal(failedEval.auditedText, null);
+  assert.equal(
+    failedEval.reasoningPath,
+    'Evaluating boundary layer at 21.0% O2 and 15.0 cm/s.',
+  );
+  assert.equal(failedEval.reasoningFailedValidation, true);
+  assert.equal(failedEval.reasoningFailureNote, REASONING_VALIDATION_FAILED_NOTE);
+  assert.equal(failedEval.auditResult?.passed, false);
 });
 

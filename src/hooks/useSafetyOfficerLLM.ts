@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { InitProgressReport, MLCEngineInterface } from '@mlc-ai/web-llm';
+import type {
+  ChatCompletionRequestNonStreaming,
+  InitProgressReport,
+  MLCEngineInterface,
+} from '@mlc-ai/web-llm';
 import {
   isWorkerSandboxError,
   WEBGPU_IFRAME_DISABLED_NOTE,
@@ -7,16 +11,17 @@ import {
   type WebGpuRuntimePhase,
 } from '../engine/inferenceBackend';
 import {
-  auditLlmNumbers,
   buildGroundedChatAnswer,
   buildSafetyReasoningSteps,
   buildTieredSystemPrompt,
   buildVerifiedSafetySnapshot,
   buildWebLlmPrompt,
   checkOutOfScopeQuery,
+  evaluateAuditedReasoningResponse,
+  extractThoughtAndAnswer,
   NUMERIC_GUARDRAIL_INSTRUCTION,
   quickRuleMatch,
-  trimToLastCompleteSentence,
+  type AuditedReasoningEvaluation,
   type SafetyReasoningStep,
   type SafetyRecommendation,
 } from '../engine/safetyAdvisor';
@@ -31,16 +36,18 @@ import { formatSpreadRate, type UnitSystem } from '../engine/units';
 import {
   formatTierStatusLabel,
   getCachedHardwareProfile,
+  getGenerationParamsForModel,
   getHardwareProfile,
+  isQwen3ModelId,
   resolveVerifiedMlcModelId,
   type HardwareProfile,
 } from '../utils/hardwareProfiler';
 
+export { extractThoughtAndAnswer };
 export const WEBLLM_MODEL_ID = 'Qwen2.5-1.5B-Instruct-q4f16_1-MLC';
 
 const WARMUP_TIMEOUT_MS = 10_000;
 const COMPLETION_TIMEOUT_MS = 18_000;
-const LOCKED_TEMPERATURE = 0.15;
 
 // Module-level singleton engine, worker, and initialization promise deduplicator
 let engineInstance: MLCEngineInterface | null = null;
@@ -112,6 +119,9 @@ export interface SafetyChatMessage {
   snapshot?: MessageTelemetrySnapshot;
   thoughtSteps?: SafetyReasoningStep[];
   thoughtDurationS?: number;
+  reasoningPath?: string;
+  reasoningFailedValidation?: boolean;
+  reasoningFailureNote?: string;
   createdAtMs?: number;
   threadSnapshot?: SafetyChatMessage[];
 }
@@ -304,14 +314,15 @@ export function useSafetyOfficerLLM({
 
           if (!verifiedModelId) {
             throw new Error(
-              `No verified Qwen2.5 model ID from [${profile.candidateModelIds.join(', ')}] found in prebuiltAppConfig.model_list`,
+              `No verified Qwen model ID from [${profile.candidateModelIds.join(', ')}] found in prebuiltAppConfig.model_list`,
             );
           }
 
           activeSingletonModelId = verifiedModelId;
           setActiveModelId(verifiedModelId);
 
-          const minContextWindow = profile.tier === 'performance' ? 2048 : 1024;
+          const minContextWindow =
+            profile.tier === 'performance' ? 2048 : profile.tier === 'balanced' ? 1536 : 1024;
           const contextWindowSize = Math.max(minContextWindow, profile.contextWindowSize);
 
           setLoadNote(
@@ -377,14 +388,19 @@ export function useSafetyOfficerLLM({
           // Conditional 1-token shader warmup on balanced & performance tiers
           if (profile.enableWarmup) {
             setLoadNote(`Pre-compiling WebGPU shaders (${profile.tier} tier)...`);
+            const warmupParams = getGenerationParamsForModel(verifiedModelId, profile);
             try {
+              const warmupRequest: ChatCompletionRequestNonStreaming & { top_k?: number } = {
+                messages: [{ role: 'user', content: 'ok' }],
+                max_tokens: 1,
+                temperature: isQwen3ModelId(verifiedModelId) ? warmupParams.temperature : 0.1,
+                ...(isQwen3ModelId(verifiedModelId)
+                  ? { top_p: warmupParams.top_p, top_k: warmupParams.top_k }
+                  : {}),
+                stream: false,
+              };
               await withTimeout(
-                createdEngine.chat.completions.create({
-                  messages: [{ role: 'user', content: 'ok' }],
-                  max_tokens: 1,
-                  temperature: 0.1,
-                  stream: false,
-                }),
+                createdEngine.chat.completions.create(warmupRequest),
                 WARMUP_TIMEOUT_MS,
                 'WebGPU warmup timed out after 10s',
               );
@@ -529,13 +545,14 @@ export function useSafetyOfficerLLM({
 
   /**
    * Executes a non-streaming atomic WebGPU completion wrapped in an 18-second hard timeout,
-   * trims truncated sentences on `finish_reason === 'length'`, resets the KV cache, and runs
-   * the strict post-LLM numeric audit against the live telemetry snapshot.
+   * applies Qwen3 sampling settings when Qwen3 is active, isolates `<think>` blocks into
+   * `reasoningPath`, trims truncated final answers, resets the KV cache, and runs the strict
+   * post-LLM numeric audit exclusively on the final answer.
    */
   const runAuditedWebGpuCompletion = useCallback(
     async (
       chatMessages: Array<{ role: 'system' | 'user' | 'assistant'; content: string }>,
-    ): Promise<string | null> => {
+    ): Promise<AuditedReasoningEvaluation | null> => {
       const engine = engineInstance;
       if (!engine) return null;
       const profile = hardwareProfile ?? (await getHardwareProfile());
@@ -543,14 +560,22 @@ export function useSafetyOfficerLLM({
         return null;
       }
 
+      const currentModelId = activeSingletonModelId ?? profile.modelId;
+      const genParams = getGenerationParamsForModel(currentModelId, profile);
+
       try {
+        const requestPayload: ChatCompletionRequestNonStreaming & { top_k?: number } = {
+          messages: chatMessages,
+          temperature: genParams.temperature,
+          top_p: genParams.top_p,
+          ...(genParams.top_k !== undefined ? { top_k: genParams.top_k } : {}),
+          ...(genParams.enableThinking ? { extra_body: { enable_thinking: true } } : {}),
+          max_tokens: genParams.max_tokens,
+          stream: false,
+        };
+
         const reply = await withTimeout(
-          engine.chat.completions.create({
-            messages: chatMessages,
-            temperature: LOCKED_TEMPERATURE,
-            max_tokens: profile.maxTokens,
-            stream: false,
-          }),
+          engine.chat.completions.create(requestPayload),
           COMPLETION_TIMEOUT_MS,
           'WebGPU inference timed out after 18s',
         );
@@ -559,13 +584,9 @@ export function useSafetyOfficerLLM({
         const rawText = choice?.message?.content?.trim() || '';
         if (!rawText) return null;
 
-        const cleanedText =
-          choice?.finish_reason === 'length'
-            ? trimToLastCompleteSentence(rawText)
-            : rawText;
-
-        const audit = auditLlmNumbers(
-          cleanedText,
+        const evaluation = evaluateAuditedReasoningResponse(
+          rawText,
+          choice?.finish_reason,
           params,
           telemetry,
           matched,
@@ -573,13 +594,15 @@ export function useSafetyOfficerLLM({
           markers,
         );
 
-        if (!audit.passed) {
-          setAuditFailCount((c) => c + 1);
-          return null;
+        if (evaluation.auditedText) {
+          setAuditPassCount((c) => c + 1);
+          return evaluation;
         }
 
-        setAuditPassCount((c) => c + 1);
-        return cleanedText;
+        if (evaluation.auditResult || evaluation.reasoningFailedValidation) {
+          setAuditFailCount((c) => c + 1);
+        }
+        return evaluation;
       } finally {
         if (engineInstance && typeof engineInstance.resetChat === 'function') {
           try {
@@ -643,9 +666,10 @@ export function useSafetyOfficerLLM({
     setMessages(nextWithUser);
 
     try {
+      let failedEvaluation: AuditedReasoningEvaluation | null = null;
       if (useWebGpu && engineInstance) {
         const prompt = buildWebLlmPrompt(params, telemetry, matched, unitSystem);
-        const auditedText = await runAuditedWebGpuCompletion([
+        const evaluation = await runAuditedWebGpuCompletion([
           {
             role: 'system',
             content: `You are an onboard Spacecraft Fire Safety Officer. Provide crisp, technical fire-suppression orders citing the exact NASA PSI run ID. Zero emojis. ${NUMERIC_GUARDRAIL_INSTRUCTION}`,
@@ -653,26 +677,31 @@ export function useSafetyOfficerLLM({
           { role: 'user', content: prompt },
         ]);
         if (cancelTokenRef.current !== token) return;
-        if (auditedText) {
+        if (evaluation?.auditedText) {
           const durationS = Math.max(0.1, (performance.now() - startedAt) / 1000);
           appendAssistantMessage({
             id: `${diagId}-a`,
             role: 'assistant',
-            content: auditedText,
+            content: evaluation.auditedText,
             source: 'Local model (numbers audited)',
             kind: 'diagnostic',
             promptForRegenerate: userPrompt,
             snapshot: snapMeta,
             thoughtSteps: steps,
             thoughtDurationS: durationS,
+            ...(evaluation.reasoningPath ? { reasoningPath: evaluation.reasoningPath } : {}),
+            reasoningFailedValidation: false,
           });
           setLastUpdatedLabel('Local model (numbers audited)');
           return;
         }
+        failedEvaluation = evaluation;
       }
 
-      const completed = await awaitReasoningTrace(token, 1180);
-      if (!completed || cancelTokenRef.current !== token) return;
+      if (!(useWebGpu && engineInstance)) {
+        const completed = await awaitReasoningTrace(token, 1180);
+        if (!completed || cancelTokenRef.current !== token) return;
+      }
       const durationS = Math.max(0.1, (performance.now() - startedAt) / 1000);
       appendAssistantMessage({
         id: `${diagId}-a`,
@@ -684,6 +713,13 @@ export function useSafetyOfficerLLM({
         snapshot: snapMeta,
         thoughtSteps: steps,
         thoughtDurationS: durationS,
+        ...(failedEvaluation?.reasoningPath
+          ? {
+              reasoningPath: failedEvaluation.reasoningPath,
+              reasoningFailedValidation: failedEvaluation.reasoningFailedValidation,
+              reasoningFailureNote: failedEvaluation.reasoningFailureNote,
+            }
+          : {}),
       });
       setLastUpdatedLabel('Deterministic');
     } catch {
@@ -834,6 +870,7 @@ export function useSafetyOfficerLLM({
       });
 
       try {
+        let failedEvaluation: AuditedReasoningEvaluation | null = null;
         if (useWebGpu && engineInstance) {
           const profile = hardwareProfile ?? (await getHardwareProfile());
           const liveSystemPrompt = buildTieredSystemPrompt(
@@ -847,32 +884,37 @@ export function useSafetyOfficerLLM({
             role: m.role,
             content: m.content,
           }));
-          const auditedText = await runAuditedWebGpuCompletion([
+          const evaluation = await runAuditedWebGpuCompletion([
             { role: 'system', content: liveSystemPrompt },
             ...recentHistory,
             { role: 'user', content: question },
           ]);
           if (cancelTokenRef.current !== token) return;
-          if (auditedText) {
+          if (evaluation?.auditedText) {
             const durationS = Math.max(0.1, (performance.now() - startedAt) / 1000);
             appendAssistantMessage({
               id: `${msgId}-a`,
               role: 'assistant',
-              content: auditedText,
+              content: evaluation.auditedText,
               source: 'Local model (numbers audited)',
               kind: 'chat',
               promptForRegenerate: question,
               snapshot: snapMeta,
               thoughtSteps: steps,
               thoughtDurationS: durationS,
+              ...(evaluation.reasoningPath ? { reasoningPath: evaluation.reasoningPath } : {}),
+              reasoningFailedValidation: false,
             });
             setLastUpdatedLabel('Local model (numbers audited)');
             return;
           }
+          failedEvaluation = evaluation;
         }
 
-        const completed = await awaitReasoningTrace(token, 1180);
-        if (!completed || cancelTokenRef.current !== token) return;
+        if (!(useWebGpu && engineInstance)) {
+          const completed = await awaitReasoningTrace(token, 1180);
+          if (!completed || cancelTokenRef.current !== token) return;
+        }
         const durationS = Math.max(0.1, (performance.now() - startedAt) / 1000);
         const fallbackText = buildGroundedChatAnswer(
           question,
@@ -892,6 +934,13 @@ export function useSafetyOfficerLLM({
           snapshot: snapMeta,
           thoughtSteps: steps,
           thoughtDurationS: durationS,
+          ...(failedEvaluation?.reasoningPath
+            ? {
+                reasoningPath: failedEvaluation.reasoningPath,
+                reasoningFailedValidation: failedEvaluation.reasoningFailedValidation,
+                reasoningFailureNote: failedEvaluation.reasoningFailureNote,
+              }
+            : {}),
         });
         setLastUpdatedLabel('Deterministic');
       } catch {
@@ -1001,6 +1050,9 @@ export function useSafetyOfficerLLM({
       let nextContent = '';
       let nextSource: SafetyMessageSource =
         outOfScopeAnswer !== null ? 'Not modeled' : 'Deterministic';
+      let nextReasoningPath: string | undefined;
+      let nextReasoningFailed = false;
+      let nextReasoningFailureNote: string | undefined;
 
       if (target.kind === 'diagnostic') {
         nextContent = verifiedSnapshot.rawText;
@@ -1029,14 +1081,21 @@ export function useSafetyOfficerLLM({
                   unitSystem,
                   profile.systemPromptBudget,
                 );
-          const auditedText = await runAuditedWebGpuCompletion([
+          const evaluation = await runAuditedWebGpuCompletion([
             { role: 'system', content: sys },
             { role: 'user', content: prompt },
           ]);
           if (cancelTokenRef.current !== token) return;
-          if (auditedText) {
-            nextContent = auditedText;
+          if (evaluation?.auditedText) {
+            nextContent = evaluation.auditedText;
             nextSource = 'Local model (numbers audited)';
+            nextReasoningPath = evaluation.reasoningPath;
+            nextReasoningFailed = false;
+            nextReasoningFailureNote = undefined;
+          } else if (evaluation?.reasoningPath) {
+            nextReasoningPath = evaluation.reasoningPath;
+            nextReasoningFailed = evaluation.reasoningFailedValidation;
+            nextReasoningFailureNote = evaluation.reasoningFailureNote;
           }
         } else if (outOfScopeAnswer === null && fastPathAnswer === null) {
           const completed = await awaitReasoningTrace(token, 1180);
@@ -1064,6 +1123,9 @@ export function useSafetyOfficerLLM({
                 snapshot: snapMeta,
                 thoughtSteps: steps,
                 thoughtDurationS: durationS,
+                reasoningPath: nextReasoningPath,
+                reasoningFailedValidation: nextReasoningFailed,
+                reasoningFailureNote: nextReasoningFailureNote,
                 createdAtMs: Date.now(),
               }
             : m,

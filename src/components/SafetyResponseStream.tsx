@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { HugeiconsIcon } from '@hugeicons/react';
 import {
+  ArrowDown01Icon,
   Copy01Icon,
   RotateLeft01Icon,
   Tick01Icon,
@@ -155,6 +156,7 @@ export const SafetyResponseStream: React.FC<SafetyResponseStreamProps> = ({
   onRunDiagnostic,
 }) => {
   const [expandedCards, setExpandedCards] = useState<Record<string, boolean>>({});
+  const [expandedReasoning, setExpandedReasoning] = useState<Record<string, boolean>>({});
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
   const handleCopy = async (id: string, text: string) => {
@@ -296,6 +298,74 @@ export const SafetyResponseStream: React.FC<SafetyResponseStreamProps> = ({
                     defaultExpanded={false}
                   />
                 )}
+                {msg.reasoningPath && (
+                  <div
+                    data-testid={`reasoning-process-accordion-${msg.id}`}
+                    data-reasoning-status={msg.reasoningFailedValidation ? 'rejected' : 'audited'}
+                    className={`rounded-xl border ${
+                      msg.reasoningFailedValidation
+                        ? 'border-amber-400/35 bg-[#151210]'
+                        : 'border-[#27272A] bg-[#111114]'
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      data-testid={`reasoning-process-toggle-${msg.id}`}
+                      aria-expanded={Boolean(expandedReasoning[msg.id])}
+                      onClick={() =>
+                        setExpandedReasoning((prev) => ({ ...prev, [msg.id]: !prev[msg.id] }))
+                      }
+                      className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-xs transition-colors hover:bg-[#18181C]/70 rounded-xl cursor-pointer"
+                    >
+                      <span className="flex items-center gap-2 min-w-0">
+                        <span className="font-medium text-[#E4E4E7] truncate">
+                          🔍 Reasoning Process
+                        </span>
+                        <span
+                          className={`rounded border px-1.5 py-0.5 font-mono text-[10px] shrink-0 ${
+                            msg.reasoningFailedValidation
+                              ? 'border-amber-400/40 bg-amber-950/40 text-amber-200'
+                              : 'border-[#27272A] bg-[#18181C] text-[#A1A1AA]'
+                          }`}
+                        >
+                          {msg.reasoningFailedValidation ? 'Unverified / Rejected' : 'Chain-of-Thought'}
+                        </span>
+                      </span>
+                      <HugeiconsIcon
+                        icon={ArrowDown01Icon}
+                        size={13}
+                        strokeWidth={1.5}
+                        className={`text-[#71717A] shrink-0 transition-transform duration-200 ${
+                          expandedReasoning[msg.id] ? 'rotate-180' : 'rotate-0'
+                        }`}
+                      />
+                    </button>
+
+                    {msg.reasoningFailedValidation && (
+                      <div
+                        data-testid={`reasoning-validation-warning-${msg.id}`}
+                        className="border-t border-amber-400/20 px-3 py-1.5 text-[11px] font-mono text-amber-200/90"
+                      >
+                        {msg.reasoningFailureNote ??
+                          'Local Reasoning Process failed validation (numerical trace mismatch); fallback engaged.'}
+                      </div>
+                    )}
+
+                    <div
+                      className="accordion-content"
+                      data-open={Boolean(expandedReasoning[msg.id])}
+                    >
+                      <div className="accordion-inner">
+                        <div className="border-t border-[#1F1F24] bg-[#0C0C0E] px-3 py-2.5 rounded-b-xl">
+                          <pre className="whitespace-pre-wrap break-words font-mono text-[11.5px] leading-relaxed text-[#A1A1AA]">
+                            {msg.reasoningPath}
+                          </pre>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
                 <div className="px-0.5">{renderStructuredAssistantBody(msg.content)}</div>
 
                 {snap && (

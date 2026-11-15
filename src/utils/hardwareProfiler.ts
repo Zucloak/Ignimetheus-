@@ -3,6 +3,7 @@ export type QuantizationTag = 'q4f16_1' | 'q4f32_1';
 export type SystemPromptBudget = 'compact' | 'standard' | 'full';
 export type LocalModelFamily =
   | 'Deterministic'
+  | 'Qwen3-0.6B'
   | 'Qwen2.5-0.5B-Instruct'
   | 'Qwen2.5-1.5B-Instruct';
 
@@ -24,7 +25,7 @@ export interface HardwareProfile extends HardwareCapabilityInput {
   modelFamily: LocalModelFamily;
   modelId: string | null;
   candidateModelIds: string[];
-  contextWindowSize: 1024 | 2048;
+  contextWindowSize: 1024 | 1536 | 2048;
   maxTokens: 140 | 220 | 320;
   systemPromptBudget: SystemPromptBudget;
   enableWarmup: boolean;
@@ -115,19 +116,30 @@ export function classifyHardwareCapabilities(
   }
 
   if (effectiveTier === 'balanced') {
-    const primary = `Qwen2.5-0.5B-Instruct-${quantization}-MLC`;
-    const secondary = `Qwen2.5-0.5B-Instruct-${altQuantization}-MLC`;
+    const primary = `Qwen3-0.6B-${quantization}-MLC`;
+    const secondary = `Qwen3-0.6B-${altQuantization}-MLC`;
+    const instructPrimary = `Qwen3-0.6B-Instruct-${quantization}-MLC`;
+    const instructSecondary = `Qwen3-0.6B-Instruct-${altQuantization}-MLC`;
+    const stepDownPrimary = `Qwen2.5-0.5B-Instruct-${quantization}-MLC`;
+    const stepDownSecondary = `Qwen2.5-0.5B-Instruct-${altQuantization}-MLC`;
     return {
       ...input,
       tier: 'balanced',
       tierOverride,
       allowWebLlm: hasWebGpu || tierOverride === 'balanced',
       quantization,
-      modelFamily: 'Qwen2.5-0.5B-Instruct',
+      modelFamily: 'Qwen3-0.6B',
       modelId: primary,
-      candidateModelIds: [primary, secondary],
-      contextWindowSize: 1024,
-      maxTokens: 220,
+      candidateModelIds: [
+        primary,
+        secondary,
+        instructPrimary,
+        instructSecondary,
+        stepDownPrimary,
+        stepDownSecondary,
+      ],
+      contextWindowSize: 1536,
+      maxTokens: 320,
       systemPromptBudget: 'standard',
       enableWarmup: true,
     };
@@ -135,6 +147,10 @@ export function classifyHardwareCapabilities(
 
   const perfPrimary = `Qwen2.5-1.5B-Instruct-${quantization}-MLC`;
   const perfSecondary = `Qwen2.5-1.5B-Instruct-${altQuantization}-MLC`;
+  const qwen3StepPrimary = `Qwen3-0.6B-${quantization}-MLC`;
+  const qwen3StepSecondary = `Qwen3-0.6B-${altQuantization}-MLC`;
+  const qwen3InstructPrimary = `Qwen3-0.6B-Instruct-${quantization}-MLC`;
+  const qwen3InstructSecondary = `Qwen3-0.6B-Instruct-${altQuantization}-MLC`;
   const stepDownPrimary = `Qwen2.5-0.5B-Instruct-${quantization}-MLC`;
   const stepDownSecondary = `Qwen2.5-0.5B-Instruct-${altQuantization}-MLC`;
 
@@ -146,11 +162,62 @@ export function classifyHardwareCapabilities(
     quantization,
     modelFamily: 'Qwen2.5-1.5B-Instruct',
     modelId: perfPrimary,
-    candidateModelIds: [perfPrimary, perfSecondary, stepDownPrimary, stepDownSecondary],
+    candidateModelIds: [
+      perfPrimary,
+      perfSecondary,
+      qwen3StepPrimary,
+      qwen3StepSecondary,
+      qwen3InstructPrimary,
+      qwen3InstructSecondary,
+      stepDownPrimary,
+      stepDownSecondary,
+    ],
     contextWindowSize: 2048,
     maxTokens: 320,
     systemPromptBudget: 'full',
     enableWarmup: true,
+  };
+}
+
+export interface ModelGenerationParams {
+  temperature: number;
+  top_p: number;
+  top_k?: number;
+  max_tokens: number;
+  enableThinking: boolean;
+}
+
+/**
+ * Detects whether the active WebLLM model ID belongs to the Qwen3 reasoning family.
+ */
+export function isQwen3ModelId(modelId: string | null | undefined): boolean {
+  return Boolean(modelId && /^qwen3/i.test(modelId.trim()));
+}
+
+/**
+ * Returns Qwen-approved non-greedy sampling parameters for Qwen3 reasoning models
+ * (temperature 0.6, top_p 0.95, top_k 20, max_tokens >= 320) to prevent repetitive
+ * thinking loops, or locked low-temperature sampling for Qwen2.5 Instruct models.
+ */
+export function getGenerationParamsForModel(
+  modelId: string | null | undefined,
+  profile?: Pick<HardwareProfile, 'maxTokens'> | null,
+): ModelGenerationParams {
+  const baseMaxTokens = profile?.maxTokens ?? 320;
+  if (isQwen3ModelId(modelId)) {
+    return {
+      temperature: 0.6,
+      top_p: 0.95,
+      top_k: 20,
+      max_tokens: Math.max(320, baseMaxTokens),
+      enableThinking: true,
+    };
+  }
+  return {
+    temperature: 0.15,
+    top_p: 0.9,
+    max_tokens: baseMaxTokens,
+    enableThinking: false,
   };
 }
 

@@ -125,10 +125,17 @@ export default function App() {
     prevVerdictRef.current = currentVerdict;
   }, [chamber.testVerdict, params, pushToast]);
 
-  // Sync simulation state to URL query parameters
+  // Sync simulation state to URL query parameters (preserving ?tier= override if present)
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    const nextSearch = serializeStateToSearch(params, unitSystem);
+    const currentParams = new URLSearchParams(window.location.search);
+    const tierParam = currentParams.get('tier');
+    const serialized = serializeStateToSearch(params, unitSystem);
+    const nextParams = new URLSearchParams(serialized);
+    if (tierParam) {
+      nextParams.set('tier', tierParam);
+    }
+    const nextSearch = `?${nextParams.toString()}`;
     if (window.location.search !== nextSearch) {
       window.history.replaceState(null, '', `${window.location.pathname}${nextSearch}`);
     }
@@ -804,6 +811,8 @@ export default function App() {
             llmProgress={safetyOfficer.loadProgress}
             isGenerating={safetyOfficer.isGenerating}
             tierStatusLabel={safetyOfficer.tierStatusLabel}
+            activeModelFamily={safetyOfficer.hardwareProfile?.modelFamily}
+            activeModelId={safetyOfficer.activeModelId ?? safetyOfficer.hardwareProfile?.modelId ?? null}
             onSelectPreset={handleSelectPreset}
             onChangeParams={handleChangeParams}
             onChangeTestDuration={handleChangeTestDuration}

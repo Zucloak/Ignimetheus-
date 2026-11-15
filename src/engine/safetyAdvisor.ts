@@ -597,6 +597,130 @@ export function trimToLastCompleteSentence(text: string): string {
   return `${trimmed}.`;
 }
 
+export const REASONING_VALIDATION_FAILED_NOTE =
+  'Local Reasoning Process failed validation (numerical trace mismatch); fallback engaged.';
+
+export interface ExtractedThoughtAndAnswer {
+  reasoningPath: string | null;
+  answer: string;
+  hasUnclosedThink: boolean;
+}
+
+/**
+ * Extracts `<think>...</think>` reasoning traces from Qwen3 / reasoning-model outputs,
+ * isolating the raw thought path while returning the clean final answer for numeric auditing.
+ * Handles multiple `<think>` blocks, empty `<think></think>` tags, and unclosed `<think>` streams.
+ */
+export function extractThoughtAndAnswer(rawText: string): ExtractedThoughtAndAnswer {
+  if (!rawText) {
+    return { reasoningPath: null, answer: '', hasUnclosedThink: false };
+  }
+
+  const thoughts: string[] = [];
+  let stripped = rawText.replace(/<think>([\s\S]*?)<\/think>/gi, (_match, inner: string) => {
+    const cleanedThought = inner.trim();
+    if (cleanedThought) {
+      thoughts.push(cleanedThought);
+    }
+    return '\n';
+  });
+
+  let hasUnclosedThink = false;
+  const openTagMatch = stripped.match(/<think>/i);
+  if (openTagMatch && openTagMatch.index !== undefined) {
+    hasUnclosedThink = true;
+    const unclosedThought = stripped.slice(openTagMatch.index + openTagMatch[0].length).trim();
+    if (unclosedThought) {
+      thoughts.push(unclosedThought);
+    }
+    stripped = stripped.slice(0, openTagMatch.index);
+  }
+
+  const answer = stripped.replace(/<\/think>/gi, '').trim();
+  const reasoningPath = thoughts.length > 0 ? thoughts.join('\n\n') : null;
+
+  return {
+    reasoningPath,
+    answer,
+    hasUnclosedThink,
+  };
+}
+
+export interface AuditedReasoningEvaluation {
+  auditedText: string | null;
+  reasoningPath?: string;
+  reasoningFailedValidation: boolean;
+  reasoningFailureNote?: string;
+  auditResult: NumericAuditResult | null;
+}
+
+/**
+ * Extracts any `<think>` block, optionally trims truncated final answers, and runs
+ * strict numeric validation strictly on the final answer (excluding `<think>` scratchpad numbers).
+ * If validation fails while a reasoning path exists, preserves the thought path flagged as
+ * failed validation so the UI can fall back to Deterministic while keeping audit transparency.
+ */
+export function evaluateAuditedReasoningResponse(
+  rawText: string,
+  finishReason: string | null | undefined,
+  params: SimulationParams,
+  telemetry: ThermoTelemetry,
+  matched: MatchedExperimentResult,
+  unitSystem: UnitSystem,
+  markers: CadMarker[] = [],
+): AuditedReasoningEvaluation {
+  const extracted = extractThoughtAndAnswer(rawText);
+  const candidateAnswer =
+    finishReason === 'length' && extracted.answer
+      ? trimToLastCompleteSentence(extracted.answer)
+      : extracted.answer;
+
+  if (!candidateAnswer) {
+    if (extracted.reasoningPath) {
+      return {
+        auditedText: null,
+        reasoningPath: extracted.reasoningPath,
+        reasoningFailedValidation: true,
+        reasoningFailureNote: REASONING_VALIDATION_FAILED_NOTE,
+        auditResult: null,
+      };
+    }
+    return {
+      auditedText: null,
+      reasoningFailedValidation: false,
+      auditResult: null,
+    };
+  }
+
+  const auditResult = auditLlmNumbers(
+    candidateAnswer,
+    params,
+    telemetry,
+    matched,
+    unitSystem,
+    markers,
+  );
+
+  if (!auditResult.passed) {
+    return {
+      auditedText: null,
+      ...(extracted.reasoningPath ? { reasoningPath: extracted.reasoningPath } : {}),
+      reasoningFailedValidation: Boolean(extracted.reasoningPath),
+      ...(extracted.reasoningPath
+        ? { reasoningFailureNote: REASONING_VALIDATION_FAILED_NOTE }
+        : {}),
+      auditResult,
+    };
+  }
+
+  return {
+    auditedText: candidateAnswer,
+    ...(extracted.reasoningPath ? { reasoningPath: extracted.reasoningPath } : {}),
+    reasoningFailedValidation: false,
+    auditResult,
+  };
+}
+
 export const QUICK_SAFETY_QUESTIONS = [
   'Why does 0 cm/s quench in 0g?',
   'Compare with Earth 1g test',

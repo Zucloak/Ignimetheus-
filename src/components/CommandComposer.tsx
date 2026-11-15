@@ -80,6 +80,8 @@ interface CommandComposerProps {
   llmProgress: number;
   isGenerating: boolean;
   tierStatusLabel?: string;
+  activeModelFamily?: string;
+  activeModelId?: string | null;
   onSelectPreset: (preset: MissionPreset) => void;
   onChangeParams: (patch: Partial<SimulationParams>) => void;
   onChangeTestDuration: (next: TestDurationMode) => void;
@@ -110,6 +112,8 @@ export const CommandComposer: React.FC<CommandComposerProps> = ({
   llmProgress,
   isGenerating,
   tierStatusLabel,
+  activeModelFamily = 'Qwen2.5-1.5B',
+  activeModelId,
   onSelectPreset,
   onChangeParams,
   onChangeTestDuration,
@@ -311,8 +315,15 @@ export const CommandComposer: React.FC<CommandComposerProps> = ({
     }
   };
 
-  const modelLabel = getSelectedEngineLabel(selectedBackend);
-  const statusDisplay = formatComposerBackendStatus(selectedBackend, webGpuPhase, llmProgress);
+  const effectiveModelFamily =
+    activeModelFamily && activeModelFamily !== 'Deterministic' ? activeModelFamily : 'Qwen2.5-1.5B';
+  const modelLabel = getSelectedEngineLabel(selectedBackend, effectiveModelFamily);
+  const statusDisplay = formatComposerBackendStatus(
+    selectedBackend,
+    webGpuPhase,
+    llmProgress,
+    effectiveModelFamily,
+  );
   const statusDotColor =
     statusDisplay.dotColor === 'cyan'
       ? 'bg-cyan-300'
@@ -463,9 +474,9 @@ export const CommandComposer: React.FC<CommandComposerProps> = ({
               className="flex w-full items-center justify-between rounded-lg px-2.5 py-2 text-left text-xs text-[#F4F4F5] hover:bg-[#18181C] cursor-pointer"
             >
               <div className="min-w-0 pr-2">
-                <div className="font-medium">Qwen2.5-1.5B Local WebGPU</div>
+                <div className="font-medium">{effectiveModelFamily} Local WebGPU</div>
                 <div className="text-[10.5px] font-mono text-[#71717A] truncate">
-                  {WEBLLM_MODEL_ID}
+                  {activeModelId ?? WEBLLM_MODEL_ID}
                 </div>
               </div>
               {selectedBackend === 'webgpu' && (

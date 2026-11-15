@@ -11,9 +11,12 @@ export type WebGpuRuntimePhase =
 export const WEBGPU_IFRAME_DISABLED_NOTE =
   'WebGPU disabled in preview iframe — open in Chrome/Edge desktop for local GPU inference; using Verified Telemetry Engine meanwhile';
 
-export function getSelectedEngineLabel(selectedBackend: InferenceBackendId): string {
+export function getSelectedEngineLabel(
+  selectedBackend: InferenceBackendId,
+  modelFamily = 'Qwen2.5-1.5B',
+): string {
   return selectedBackend === 'webgpu'
-    ? 'Qwen2.5-1.5B Local WebGPU'
+    ? `${modelFamily} Local WebGPU`
     : 'Verified Telemetry Engine';
 }
 
@@ -21,6 +24,7 @@ export function formatComposerBackendStatus(
   selectedBackend: InferenceBackendId,
   phase: WebGpuRuntimePhase,
   progressPct: number,
+  modelFamily = 'Qwen2.5-1.5B',
 ): { label: string; dotColor: 'cyan' | 'amber' | 'zinc' } {
   if (selectedBackend === 'verified') {
     return { label: 'Telemetry Grounded', dotColor: 'zinc' };
@@ -32,7 +36,7 @@ export function formatComposerBackendStatus(
 
   if (phase === 'probing' || phase === 'loading') {
     const clamped = Math.max(0, Math.min(100, Math.round(progressPct)));
-    return { label: `Loading Qwen2.5-1.5B · ${clamped}%`, dotColor: 'amber' };
+    return { label: `Loading ${modelFamily} · ${clamped}%`, dotColor: 'amber' };
   }
 
   if (phase === 'unavailable' || phase === 'error') {
